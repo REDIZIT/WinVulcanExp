@@ -1,4 +1,9 @@
-﻿using System.Runtime.CompilerServices;
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Timers;
 using Silk.NET.Core;
@@ -8,28 +13,11 @@ using Silk.NET.Vulkan;
 using Silk.NET.Vulkan.Extensions.EXT;
 using Silk.NET.Vulkan.Extensions.KHR;
 using Silk.NET.Windowing;
+using Buffer = Silk.NET.Vulkan.Buffer;
 using Semaphore = Silk.NET.Vulkan.Semaphore;
 
 var app = new HelloTriangleApplication();
 app.Run();
-
-struct QueueFamilyIndices
-{
-    public uint? GraphicsFamily { get; set; }
-    public uint? PresentFamily { get; set; }
-
-    public bool IsComplete()
-    {
-        return GraphicsFamily.HasValue && PresentFamily.HasValue;
-    }
-}
-
-struct SwapChainSupportDetails
-{
-    public SurfaceCapabilitiesKHR Capabilities;
-    public SurfaceFormatKHR[] Formats;
-    public PresentModeKHR[] PresentModes;
-}
 
 unsafe class HelloTriangleApplication
 {
@@ -37,13 +25,6 @@ unsafe class HelloTriangleApplication
     const int HEIGHT = 600;
 
     const int MAX_FRAMES_IN_FLIGHT = 2;
-
-    bool EnableValidationLayers = false;
-
-    private readonly string[] validationLayers = new[]
-    {
-        "VK_LAYER_KHRONOS_validation"
-    };
 
     private readonly string[] deviceExtensions = new[]
     {
@@ -55,8 +36,6 @@ unsafe class HelloTriangleApplication
 
     private Instance instance;
 
-    private ExtDebugUtils? debugUtils;
-    private DebugUtilsMessengerEXT debugMessenger;
     private KhrSurface? khrSurface;
     private SurfaceKHR surface;
 
@@ -79,6 +58,10 @@ unsafe class HelloTriangleApplication
     private Pipeline graphicsPipeline;
 
     private CommandPool commandPool;
+
+    private Buffer vertexBuffer;
+    private DeviceMemory vertexBufferMemory;
+
     private CommandBuffer[]? commandBuffers;
 
     private Semaphore[]? imageAvailableSemaphores;
@@ -86,7 +69,17 @@ unsafe class HelloTriangleApplication
     private Fence[]? inFlightFences;
     private Fence[]? imagesInFlight;
     private int currentFrame = 0;
+
     private int currentAbsFrame;
+    private App app = new();
+    private bool frameBufferResized = false;
+
+    private Vertex[] vertices = new Vertex[]
+    {
+        new Vertex { pos = new Vector2D<float>(0.0f,-1), color = new Vector3D<float>(1.0f, 0.0f, 0.0f) },
+        new Vertex { pos = new Vector2D<float>(0.5f,0.5f), color = new Vector3D<float>(0.0f, 1.0f, 0.0f) },
+        new Vertex { pos = new Vector2D<float>(-0.5f,0.5f), color = new Vector3D<float>(0.0f, 0.0f, 1.0f) },
+    };
 
     public void Run()
     {
@@ -102,7 +95,7 @@ unsafe class HelloTriangleApplication
         var options = WindowOptions.DefaultVulkan with
         {
             Size = new Vector2D<int>(WIDTH, HEIGHT),
-            Title = "Vulkan",
+            Title = "Vulkan"
         };
 
         window = Window.Create(options);
@@ -117,7 +110,6 @@ unsafe class HelloTriangleApplication
     private void InitVulkan()
     {
         CreateInstance();
-        SetupDebugMessenger();
         CreateSurface();
         PickPhysicalDevice();
         CreateLogicalDevice();
@@ -127,6 +119,7 @@ unsafe class HelloTriangleApplication
         CreateGraphicsPipeline();
         CreateFramebuffers();
         CreateCommandPool();
+        CreateVertexBuffer();
         CreateCommandBuffers();
         CreateSyncObjects();
     }
@@ -150,6 +143,11 @@ unsafe class HelloTriangleApplication
 
     private void CleanUp()
     {
+        CleanUpSwapChain();
+
+        vk!.DestroyBuffer(device, vertexBuffer, null);
+        vk!.FreeMemory(device, vertexBufferMemory, null);
+
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
             vk!.DestroySemaphore(device, renderFinishedSemaphores![i], null);
@@ -159,29 +157,7 @@ unsafe class HelloTriangleApplication
 
         vk!.DestroyCommandPool(device, commandPool, null);
 
-        foreach (var framebuffer in swapChainFramebuffers!)
-        {
-            vk!.DestroyFramebuffer(device, framebuffer, null);
-        }
-
-        vk!.DestroyPipeline(device, graphicsPipeline, null);
-        vk!.DestroyPipelineLayout(device, pipelineLayout, null);
-        vk!.DestroyRenderPass(device, renderPass, null);
-
-        foreach (var imageView in swapChainImageViews!)
-        {
-            vk!.DestroyImageView(device, imageView, null);
-        }
-
-        khrSwapChain!.DestroySwapchain(device, swapChain, null);
-
         vk!.DestroyDevice(device, null);
-
-        if (EnableValidationLayers)
-        {
-            //DestroyDebugUtilsMessenger equivilant to method DestroyDebugUtilsMessengerEXT from original tutorial.
-            debugUtils!.DestroyDebugUtilsMessenger(instance, debugMessenger, null);
-        }
 
         khrSurface!.DestroySurface(instance, surface, null);
         vk!.DestroyInstance(instance, null);
@@ -193,11 +169,6 @@ unsafe class HelloTriangleApplication
     private void CreateInstance()
     {
         vk = Vk.GetApi();
-
-        if (EnableValidationLayers && !CheckValidationLayerSupport())
-        {
-            throw new Exception("validation layers requested, but not available!");
-        }
 
         ApplicationInfo appInfo = new()
         {
@@ -217,22 +188,10 @@ unsafe class HelloTriangleApplication
 
         var extensions = GetRequiredExtensions();
         createInfo.EnabledExtensionCount = (uint)extensions.Length;
-        createInfo.PpEnabledExtensionNames = (byte**)SilkMarshal.StringArrayToPtr(extensions); ;
+        createInfo.PpEnabledExtensionNames = (byte**)SilkMarshal.StringArrayToPtr(extensions);
 
-        if (EnableValidationLayers)
-        {
-            createInfo.EnabledLayerCount = (uint)validationLayers.Length;
-            createInfo.PpEnabledLayerNames = (byte**)SilkMarshal.StringArrayToPtr(validationLayers);
-
-            DebugUtilsMessengerCreateInfoEXT debugCreateInfo = new();
-            PopulateDebugMessengerCreateInfo(ref debugCreateInfo);
-            createInfo.PNext = &debugCreateInfo;
-        }
-        else
-        {
-            createInfo.EnabledLayerCount = 0;
-            createInfo.PNext = null;
-        }
+        createInfo.EnabledLayerCount = 0;
+        createInfo.PNext = null;
 
         if (vk.CreateInstance(in createInfo, null, out instance) != Result.Success)
         {
@@ -242,39 +201,6 @@ unsafe class HelloTriangleApplication
         Marshal.FreeHGlobal((IntPtr)appInfo.PApplicationName);
         Marshal.FreeHGlobal((IntPtr)appInfo.PEngineName);
         SilkMarshal.Free((nint)createInfo.PpEnabledExtensionNames);
-
-        if (EnableValidationLayers)
-        {
-            SilkMarshal.Free((nint)createInfo.PpEnabledLayerNames);
-        }
-    }
-
-    private void PopulateDebugMessengerCreateInfo(ref DebugUtilsMessengerCreateInfoEXT createInfo)
-    {
-        createInfo.SType = StructureType.DebugUtilsMessengerCreateInfoExt;
-        createInfo.MessageSeverity = DebugUtilsMessageSeverityFlagsEXT.VerboseBitExt |
-                                     DebugUtilsMessageSeverityFlagsEXT.WarningBitExt |
-                                     DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt;
-        createInfo.MessageType = DebugUtilsMessageTypeFlagsEXT.GeneralBitExt |
-                                 DebugUtilsMessageTypeFlagsEXT.PerformanceBitExt |
-                                 DebugUtilsMessageTypeFlagsEXT.ValidationBitExt;
-        createInfo.PfnUserCallback = (DebugUtilsMessengerCallbackFunctionEXT)DebugCallback;
-    }
-
-    private void SetupDebugMessenger()
-    {
-        if (!EnableValidationLayers) return;
-
-        //TryGetInstanceExtension equivilant to method CreateDebugUtilsMessengerEXT from original tutorial.
-        if (!vk!.TryGetInstanceExtension(instance, out debugUtils)) return;
-
-        DebugUtilsMessengerCreateInfoEXT createInfo = new();
-        PopulateDebugMessengerCreateInfo(ref createInfo);
-
-        if (debugUtils!.CreateDebugUtilsMessenger(instance, in createInfo, null, out debugMessenger) != Result.Success)
-        {
-            throw new Exception("failed to set up debug messenger!");
-        }
     }
 
     private void CreateSurface()
@@ -342,15 +268,7 @@ unsafe class HelloTriangleApplication
             PpEnabledExtensionNames = (byte**)SilkMarshal.StringArrayToPtr(deviceExtensions)
         };
 
-        if (EnableValidationLayers)
-        {
-            createInfo.EnabledLayerCount = (uint)validationLayers.Length;
-            createInfo.PpEnabledLayerNames = (byte**)SilkMarshal.StringArrayToPtr(validationLayers);
-        }
-        else
-        {
-            createInfo.EnabledLayerCount = 0;
-        }
+        createInfo.EnabledLayerCount = 0;
 
         if (vk!.CreateDevice(physicalDevice, in createInfo, null, out device) != Result.Success)
         {
@@ -360,13 +278,7 @@ unsafe class HelloTriangleApplication
         vk!.GetDeviceQueue(device, indices.GraphicsFamily!.Value, 0, out graphicsQueue);
         vk!.GetDeviceQueue(device, indices.PresentFamily!.Value, 0, out presentQueue);
 
-        if (EnableValidationLayers)
-        {
-            SilkMarshal.Free((nint)createInfo.PpEnabledLayerNames);
-        }
-
         SilkMarshal.Free((nint)createInfo.PpEnabledExtensionNames);
-
     }
 
     private void CreateSwapChain()
@@ -564,118 +476,126 @@ unsafe class HelloTriangleApplication
             fragShaderStageInfo
         };
 
-        PipelineVertexInputStateCreateInfo vertexInputInfo = new()
-        {
-            SType = StructureType.PipelineVertexInputStateCreateInfo,
-            VertexBindingDescriptionCount = 0,
-            VertexAttributeDescriptionCount = 0,
-        };
+        var bindingDescription = Vertex.GetBindingDescription();
+        var attributeDescriptions = Vertex.GetAttributeDescriptions();
 
-        PipelineInputAssemblyStateCreateInfo inputAssembly = new()
+        fixed (VertexInputAttributeDescription* attributeDescriptionsPtr = attributeDescriptions)
         {
-            SType = StructureType.PipelineInputAssemblyStateCreateInfo,
-            Topology = PrimitiveTopology.TriangleList,
-            PrimitiveRestartEnable = false,
-        };
 
-        Viewport viewport = new()
-        {
-            X = 0,
-            Y = 0,
-            Width = swapChainExtent.Width,
-            Height = swapChainExtent.Height,
-            MinDepth = 0,
-            MaxDepth = 1,
-        };
+            PipelineVertexInputStateCreateInfo vertexInputInfo = new()
+            {
+                SType = StructureType.PipelineVertexInputStateCreateInfo,
+                VertexBindingDescriptionCount = 1,
+                VertexAttributeDescriptionCount = (uint)attributeDescriptions.Length,
+                PVertexBindingDescriptions = &bindingDescription,
+                PVertexAttributeDescriptions = attributeDescriptionsPtr,
+            };
 
-        Rect2D scissor = new()
-        {
-            Offset = { X = 0, Y = 0 },
-            Extent = swapChainExtent,
-        };
+            PipelineInputAssemblyStateCreateInfo inputAssembly = new()
+            {
+                SType = StructureType.PipelineInputAssemblyStateCreateInfo,
+                Topology = PrimitiveTopology.TriangleList,
+                PrimitiveRestartEnable = false,
+            };
 
-        PipelineViewportStateCreateInfo viewportState = new()
-        {
-            SType = StructureType.PipelineViewportStateCreateInfo,
-            ViewportCount = 1,
-            PViewports = &viewport,
-            ScissorCount = 1,
-            PScissors = &scissor,
-        };
+            Viewport viewport = new()
+            {
+                X = 0,
+                Y = 0,
+                Width = swapChainExtent.Width,
+                Height = swapChainExtent.Height,
+                MinDepth = 0,
+                MaxDepth = 1,
+            };
 
-        PipelineRasterizationStateCreateInfo rasterizer = new()
-        {
-            SType = StructureType.PipelineRasterizationStateCreateInfo,
-            DepthClampEnable = false,
-            RasterizerDiscardEnable = false,
-            PolygonMode = PolygonMode.Fill,
-            LineWidth = 1,
-            CullMode = CullModeFlags.BackBit,
-            FrontFace = FrontFace.Clockwise,
-            DepthBiasEnable = false,
-        };
+            Rect2D scissor = new()
+            {
+                Offset = { X = 0, Y = 0 },
+                Extent = swapChainExtent,
+            };
 
-        PipelineMultisampleStateCreateInfo multisampling = new()
-        {
-            SType = StructureType.PipelineMultisampleStateCreateInfo,
-            SampleShadingEnable = false,
-            RasterizationSamples = SampleCountFlags.Count1Bit,
-        };
+            PipelineViewportStateCreateInfo viewportState = new()
+            {
+                SType = StructureType.PipelineViewportStateCreateInfo,
+                ViewportCount = 1,
+                PViewports = &viewport,
+                ScissorCount = 1,
+                PScissors = &scissor,
+            };
 
-        PipelineColorBlendAttachmentState colorBlendAttachment = new()
-        {
-            ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit | ColorComponentFlags.BBit | ColorComponentFlags.ABit,
-            BlendEnable = false,
-        };
+            PipelineRasterizationStateCreateInfo rasterizer = new()
+            {
+                SType = StructureType.PipelineRasterizationStateCreateInfo,
+                DepthClampEnable = false,
+                RasterizerDiscardEnable = false,
+                PolygonMode = PolygonMode.Fill,
+                LineWidth = 1,
+                CullMode = CullModeFlags.BackBit,
+                FrontFace = FrontFace.Clockwise,
+                DepthBiasEnable = false,
+            };
 
-        PipelineColorBlendStateCreateInfo colorBlending = new()
-        {
-            SType = StructureType.PipelineColorBlendStateCreateInfo,
-            LogicOpEnable = false,
-            LogicOp = LogicOp.Copy,
-            AttachmentCount = 1,
-            PAttachments = &colorBlendAttachment,
-        };
+            PipelineMultisampleStateCreateInfo multisampling = new()
+            {
+                SType = StructureType.PipelineMultisampleStateCreateInfo,
+                SampleShadingEnable = false,
+                RasterizationSamples = SampleCountFlags.Count1Bit,
+            };
 
-        colorBlending.BlendConstants[0] = 0;
-        colorBlending.BlendConstants[1] = 0;
-        colorBlending.BlendConstants[2] = 0;
-        colorBlending.BlendConstants[3] = 0;
+            PipelineColorBlendAttachmentState colorBlendAttachment = new()
+            {
+                ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit | ColorComponentFlags.BBit | ColorComponentFlags.ABit,
+                BlendEnable = false,
+            };
 
-        PipelineLayoutCreateInfo pipelineLayoutInfo = new()
-        {
-            SType = StructureType.PipelineLayoutCreateInfo,
-            SetLayoutCount = 0,
-            PushConstantRangeCount = 0,
-        };
+            PipelineColorBlendStateCreateInfo colorBlending = new()
+            {
+                SType = StructureType.PipelineColorBlendStateCreateInfo,
+                LogicOpEnable = false,
+                LogicOp = LogicOp.Copy,
+                AttachmentCount = 1,
+                PAttachments = &colorBlendAttachment,
+            };
 
-        if (vk!.CreatePipelineLayout(device, in pipelineLayoutInfo, null, out pipelineLayout) != Result.Success)
-        {
-            throw new Exception("failed to create pipeline layout!");
+            colorBlending.BlendConstants[0] = 0;
+            colorBlending.BlendConstants[1] = 0;
+            colorBlending.BlendConstants[2] = 0;
+            colorBlending.BlendConstants[3] = 0;
+
+            PipelineLayoutCreateInfo pipelineLayoutInfo = new()
+            {
+                SType = StructureType.PipelineLayoutCreateInfo,
+                SetLayoutCount = 0,
+                PushConstantRangeCount = 0,
+            };
+
+            if (vk!.CreatePipelineLayout(device, in pipelineLayoutInfo, null, out pipelineLayout) != Result.Success)
+            {
+                throw new Exception("failed to create pipeline layout!");
+            }
+
+            GraphicsPipelineCreateInfo pipelineInfo = new()
+            {
+                SType = StructureType.GraphicsPipelineCreateInfo,
+                StageCount = 2,
+                PStages = shaderStages,
+                PVertexInputState = &vertexInputInfo,
+                PInputAssemblyState = &inputAssembly,
+                PViewportState = &viewportState,
+                PRasterizationState = &rasterizer,
+                PMultisampleState = &multisampling,
+                PColorBlendState = &colorBlending,
+                Layout = pipelineLayout,
+                RenderPass = renderPass,
+                Subpass = 0,
+                BasePipelineHandle = default
+            };
+
+            if (vk!.CreateGraphicsPipelines(device, default, 1, in pipelineInfo, null, out graphicsPipeline) != Result.Success)
+            {
+                throw new Exception("failed to create graphics pipeline!");
+            }
         }
-
-        GraphicsPipelineCreateInfo pipelineInfo = new()
-        {
-            SType = StructureType.GraphicsPipelineCreateInfo,
-            StageCount = 2,
-            PStages = shaderStages,
-            PVertexInputState = &vertexInputInfo,
-            PInputAssemblyState = &inputAssembly,
-            PViewportState = &viewportState,
-            PRasterizationState = &rasterizer,
-            PMultisampleState = &multisampling,
-            PColorBlendState = &colorBlending,
-            Layout = pipelineLayout,
-            RenderPass = renderPass,
-            Subpass = 0,
-            BasePipelineHandle = default
-        };
-
-        if (vk!.CreateGraphicsPipelines(device, default, 1, in pipelineInfo, null, out graphicsPipeline) != Result.Success)
-        {
-            throw new Exception("failed to create graphics pipeline!");
-        }
-
 
         vk!.DestroyShaderModule(device, fragShaderModule, null);
         vk!.DestroyShaderModule(device, vertShaderModule, null);
@@ -724,6 +644,65 @@ unsafe class HelloTriangleApplication
         {
             throw new Exception("failed to create command pool!");
         }
+    }
+
+    private void CreateVertexBuffer()
+    {
+        BufferCreateInfo bufferInfo = new()
+        {
+            SType = StructureType.BufferCreateInfo,
+            Size = (ulong)(sizeof(Vertex) * vertices.Length),
+            Usage = BufferUsageFlags.VertexBufferBit,
+            SharingMode = SharingMode.Exclusive,
+        };
+
+        fixed (Buffer* vertexBufferPtr = &vertexBuffer)
+        {
+            if (vk!.CreateBuffer(device, in bufferInfo, null, vertexBufferPtr) != Result.Success)
+            {
+                throw new Exception("failed to create vertex buffer!");
+            }
+        }
+
+        MemoryRequirements memRequirements = new();
+        vk!.GetBufferMemoryRequirements(device, vertexBuffer, out memRequirements);
+
+        MemoryAllocateInfo allocateInfo = new()
+        {
+            SType = StructureType.MemoryAllocateInfo,
+            AllocationSize = memRequirements.Size,
+            MemoryTypeIndex = FindMemoryType(memRequirements.MemoryTypeBits, MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit),
+        };
+
+        fixed (DeviceMemory* vertexBufferMemoryPtr = &vertexBufferMemory)
+        {
+            if (vk!.AllocateMemory(device, in allocateInfo, null, vertexBufferMemoryPtr) != Result.Success)
+            {
+                throw new Exception("failed to allocate vertex buffer memory!");
+            }
+        }
+
+        vk!.BindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
+
+        void* data;
+        vk!.MapMemory(device, vertexBufferMemory, 0, bufferInfo.Size, 0, &data);
+        vertices.AsSpan().CopyTo(new Span<Vertex>(data, vertices.Length));
+        vk!.UnmapMemory(device, vertexBufferMemory);
+    }
+
+    private uint FindMemoryType(uint typeFilter, MemoryPropertyFlags properties)
+    {
+        vk!.GetPhysicalDeviceMemoryProperties(physicalDevice, out PhysicalDeviceMemoryProperties memProperties);
+
+        for (int i = 0; i < memProperties.MemoryTypeCount; i++)
+        {
+            if ((typeFilter & (1 << i)) != 0 && (memProperties.MemoryTypes[i].PropertyFlags & properties) == properties)
+            {
+                return (uint)i;
+            }
+        }
+
+        throw new Exception("failed to find suitable memory type!");
     }
 
     private void CreateCommandBuffers()
@@ -783,6 +762,15 @@ unsafe class HelloTriangleApplication
 
             vk!.CmdBindPipeline(commandBuffers[i], PipelineBindPoint.Graphics, graphicsPipeline);
 
+            var vertexBuffers = new Buffer[] { vertexBuffer };
+            var offsets = new ulong[] { 0 };
+
+            fixed (ulong* offsetsPtr = offsets)
+            fixed (Buffer* vertexBuffersPtr = vertexBuffers)
+            {
+                vk!.CmdBindVertexBuffers(commandBuffers[i], 0, 1, vertexBuffersPtr, offsetsPtr);
+            }
+
             vk!.CmdDraw(commandBuffers[i], 3, 1, 0, 0);
 
             vk!.CmdEndRenderPass(commandBuffers[i]);
@@ -824,12 +812,28 @@ unsafe class HelloTriangleApplication
         }
     }
 
-    private void DrawFrame(double delta)
+    private void Render(double delta)
+    {
+        app.OnRender();
+        DrawFrame(delta);
+    }
+
+     private void DrawFrame(double delta)
     {
         vk!.WaitForFences(device, 1, in inFlightFences![currentFrame], true, ulong.MaxValue);
 
         uint imageIndex = 0;
-        khrSwapChain!.AcquireNextImage(device, swapChain, ulong.MaxValue, imageAvailableSemaphores![currentFrame], default, ref imageIndex);
+        var result = khrSwapChain!.AcquireNextImage(device, swapChain, ulong.MaxValue, imageAvailableSemaphores![currentFrame], default, ref imageIndex);
+
+        if (result == Result.ErrorOutOfDateKhr)
+        {
+            RecreateSwapChain();
+            return;
+        }
+        else if (result != Result.Success && result != Result.SuboptimalKhr)
+        {
+            throw new Exception("failed to acquire swap chain image!");
+        }
 
         if (imagesInFlight![imageIndex].Handle != default)
         {
@@ -866,9 +870,10 @@ unsafe class HelloTriangleApplication
 
         vk!.ResetFences(device, 1, in inFlightFences[currentFrame]);
 
-        if (vk!.QueueSubmit(graphicsQueue, 1, in submitInfo, inFlightFences[currentFrame]) != Result.Success)
+        Result submitResult = vk!.QueueSubmit(graphicsQueue, 1, in submitInfo, inFlightFences[currentFrame]);
+        if (submitResult != Result.Success)
         {
-            throw new Exception("failed to submit draw command buffer!");
+            throw new Exception("Failed to submit draw command buffer! Result: " + submitResult);
         }
 
         var swapChains = stackalloc[] { swapChain };
@@ -885,11 +890,69 @@ unsafe class HelloTriangleApplication
             PImageIndices = &imageIndex
         };
 
-        khrSwapChain.QueuePresent(presentQueue, in presentInfo);
+        result = khrSwapChain.QueuePresent(presentQueue, in presentInfo);
+
+        if (result == Result.ErrorOutOfDateKhr || result == Result.SuboptimalKhr || frameBufferResized)
+        {
+            frameBufferResized = false;
+            RecreateSwapChain();
+        }
+        else if (result != Result.Success)
+        {
+            throw new Exception("failed to present swap chain image!");
+        }
 
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-        currentAbsFrame++;
+
     }
+
+     private void RecreateSwapChain()
+     {
+         Vector2D<int> framebufferSize = window!.FramebufferSize;
+
+         while (framebufferSize.X == 0 || framebufferSize.Y == 0)
+         {
+             framebufferSize = window.FramebufferSize;
+             window.DoEvents();
+         }
+
+         vk!.DeviceWaitIdle(device);
+
+         CleanUpSwapChain();
+
+         CreateSwapChain();
+         CreateImageViews();
+         CreateRenderPass();
+         CreateGraphicsPipeline();
+         CreateFramebuffers();
+         CreateCommandBuffers();
+
+         imagesInFlight = new Fence[swapChainImages!.Length];
+     }
+
+     private void CleanUpSwapChain()
+     {
+         foreach (var framebuffer in swapChainFramebuffers!)
+         {
+             vk!.DestroyFramebuffer(device, framebuffer, null);
+         }
+
+         fixed (CommandBuffer* commandBuffersPtr = commandBuffers)
+         {
+             vk!.FreeCommandBuffers(device, commandPool, (uint)commandBuffers!.Length, commandBuffersPtr);
+         }
+
+         vk!.DestroyPipeline(device, graphicsPipeline, null);
+         vk!.DestroyPipelineLayout(device, pipelineLayout, null);
+         vk!.DestroyRenderPass(device, renderPass, null);
+
+         foreach (var imageView in swapChainImageViews!)
+         {
+             vk!.DestroyImageView(device, imageView, null);
+         }
+
+         khrSwapChain!.DestroySwapchain(device, swapChain, null);
+     }
 
     private ShaderModule CreateShaderModule(byte[] code)
     {
@@ -1084,27 +1147,7 @@ unsafe class HelloTriangleApplication
         var glfwExtensions = window!.VkSurface!.GetRequiredExtensions(out var glfwExtensionCount);
         var extensions = SilkMarshal.PtrToStringArray((nint)glfwExtensions, (int)glfwExtensionCount);
 
-        if (EnableValidationLayers)
-        {
-            return extensions.Append(ExtDebugUtils.ExtensionName).ToArray();
-        }
-
         return extensions;
-    }
-
-    private bool CheckValidationLayerSupport()
-    {
-        uint layerCount = 0;
-        vk!.EnumerateInstanceLayerProperties(ref layerCount, null);
-        var availableLayers = new LayerProperties[layerCount];
-        fixed (LayerProperties* availableLayersPtr = availableLayers)
-        {
-            vk!.EnumerateInstanceLayerProperties(ref layerCount, availableLayersPtr);
-        }
-
-        var availableLayerNames = availableLayers.Select(layer => Marshal.PtrToStringAnsi((IntPtr)layer.LayerName)).ToHashSet();
-
-        return validationLayers.All(availableLayerNames.Contains);
     }
 
     private uint DebugCallback(DebugUtilsMessageSeverityFlagsEXT messageSeverity, DebugUtilsMessageTypeFlagsEXT messageTypes, DebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData)
