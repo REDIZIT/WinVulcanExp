@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Timers;
@@ -76,9 +77,9 @@ unsafe class HelloTriangleApplication
 
     private Vertex[] vertices = new Vertex[]
     {
-        new Vertex { pos = new Vector2D<float>(0.0f,-1), color = new Vector3D<float>(1.0f, 0.0f, 0.0f) },
-        new Vertex { pos = new Vector2D<float>(0.5f,0.5f), color = new Vector3D<float>(0.0f, 1.0f, 0.0f) },
-        new Vertex { pos = new Vector2D<float>(-0.5f,0.5f), color = new Vector3D<float>(0.0f, 0.0f, 1.0f) },
+        new Vertex { pos = new Vector2D<float>(0,0), color = new Vector3D<float>(1.0f, 0.0f, 0.0f) },
+        new Vertex { pos = new Vector2D<float>(100,200), color = new Vector3D<float>(0.0f, 1.0f, 0.0f) },
+        new Vertex { pos = new Vector2D<float>(200,0), color = new Vector3D<float>(0.0f, 0.0f, 1.0f) },
     };
 
     public void Run()
@@ -136,7 +137,8 @@ unsafe class HelloTriangleApplication
         };
         timer.Start();
 
-        window!.Render += DrawFrame;
+        window!.Render += Render;
+        window!.Resize += (_) => RecreateSwapChain();
         window!.Run();
         vk!.DeviceWaitIdle(device);
     }
@@ -562,11 +564,20 @@ unsafe class HelloTriangleApplication
             colorBlending.BlendConstants[2] = 0;
             colorBlending.BlendConstants[3] = 0;
 
+
+            var pushConstantRange = new PushConstantRange
+            {
+                StageFlags = ShaderStageFlags.VertexBit, // Доступен в вершинном шейдере
+                Offset = 0, // Смещение от начала блока
+                Size = (uint)Unsafe.SizeOf<Matrix4x4>() // Размер нашей матрицы
+            };
+
             PipelineLayoutCreateInfo pipelineLayoutInfo = new()
             {
                 SType = StructureType.PipelineLayoutCreateInfo,
                 SetLayoutCount = 0,
-                PushConstantRangeCount = 0,
+                PushConstantRangeCount = 1,
+                PPushConstantRanges = &pushConstantRange
             };
 
             if (vk!.CreatePipelineLayout(device, in pipelineLayoutInfo, null, out pipelineLayout) != Result.Success)
@@ -648,46 +659,104 @@ unsafe class HelloTriangleApplication
 
     private void CreateVertexBuffer()
     {
+        ulong bufferSize = (ulong)(Unsafe.SizeOf<Vertex>() * vertices.Length);
+
+        Buffer stagingBuffer = default;
+        DeviceMemory stagingBufferMemory = default;
+        CreateBuffer(bufferSize, BufferUsageFlags.TransferSrcBit, MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit, ref stagingBuffer, ref stagingBufferMemory);
+
+        void* data;
+        vk!.MapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        vertices.AsSpan().CopyTo(new Span<Vertex>(data, vertices.Length));
+        vk!.UnmapMemory(device, stagingBufferMemory);
+
+        CreateBuffer(bufferSize, BufferUsageFlags.TransferDstBit | BufferUsageFlags.VertexBufferBit, MemoryPropertyFlags.DeviceLocalBit, ref vertexBuffer, ref vertexBufferMemory);
+
+        CopyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+
+        vk!.DestroyBuffer(device, stagingBuffer, null);
+        vk!.FreeMemory(device, stagingBufferMemory, null);
+    }
+
+    private void CreateBuffer(ulong size, BufferUsageFlags usage, MemoryPropertyFlags properties, ref Buffer buffer, ref DeviceMemory bufferMemory)
+    {
         BufferCreateInfo bufferInfo = new()
         {
             SType = StructureType.BufferCreateInfo,
-            Size = (ulong)(sizeof(Vertex) * vertices.Length),
-            Usage = BufferUsageFlags.VertexBufferBit,
+            Size = size,
+            Usage = usage,
             SharingMode = SharingMode.Exclusive,
         };
 
-        fixed (Buffer* vertexBufferPtr = &vertexBuffer)
+        fixed (Buffer* bufferPtr = &buffer)
         {
-            if (vk!.CreateBuffer(device, in bufferInfo, null, vertexBufferPtr) != Result.Success)
+            if (vk!.CreateBuffer(device, in bufferInfo, null, bufferPtr) != Result.Success)
             {
                 throw new Exception("failed to create vertex buffer!");
             }
         }
 
         MemoryRequirements memRequirements = new();
-        vk!.GetBufferMemoryRequirements(device, vertexBuffer, out memRequirements);
+        vk!.GetBufferMemoryRequirements(device, buffer, out memRequirements);
 
         MemoryAllocateInfo allocateInfo = new()
         {
             SType = StructureType.MemoryAllocateInfo,
             AllocationSize = memRequirements.Size,
-            MemoryTypeIndex = FindMemoryType(memRequirements.MemoryTypeBits, MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit),
+            MemoryTypeIndex = FindMemoryType(memRequirements.MemoryTypeBits, properties),
         };
 
-        fixed (DeviceMemory* vertexBufferMemoryPtr = &vertexBufferMemory)
+        fixed (DeviceMemory* bufferMemoryPtr = &bufferMemory)
         {
-            if (vk!.AllocateMemory(device, in allocateInfo, null, vertexBufferMemoryPtr) != Result.Success)
+            if (vk!.AllocateMemory(device, in allocateInfo, null, bufferMemoryPtr) != Result.Success)
             {
                 throw new Exception("failed to allocate vertex buffer memory!");
             }
         }
 
-        vk!.BindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
+        vk!.BindBufferMemory(device, buffer, bufferMemory, 0);
+    }
 
-        void* data;
-        vk!.MapMemory(device, vertexBufferMemory, 0, bufferInfo.Size, 0, &data);
-        vertices.AsSpan().CopyTo(new Span<Vertex>(data, vertices.Length));
-        vk!.UnmapMemory(device, vertexBufferMemory);
+    private void CopyBuffer(Buffer srcBuffer, Buffer dstBuffer, ulong size)
+    {
+        CommandBufferAllocateInfo allocateInfo = new()
+        {
+            SType = StructureType.CommandBufferAllocateInfo,
+            Level = CommandBufferLevel.Primary,
+            CommandPool = commandPool,
+            CommandBufferCount = 1,
+        };
+
+        vk!.AllocateCommandBuffers(device, in allocateInfo, out CommandBuffer commandBuffer);
+
+        CommandBufferBeginInfo beginInfo = new()
+        {
+            SType = StructureType.CommandBufferBeginInfo,
+            Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
+        };
+
+        vk!.BeginCommandBuffer(commandBuffer, in beginInfo);
+
+        BufferCopy copyRegion = new()
+        {
+            Size = size,
+        };
+
+        vk!.CmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, in copyRegion);
+
+        vk!.EndCommandBuffer(commandBuffer);
+
+        SubmitInfo submitInfo = new()
+        {
+            SType = StructureType.SubmitInfo,
+            CommandBufferCount = 1,
+            PCommandBuffers = &commandBuffer,
+        };
+
+        vk!.QueueSubmit(graphicsQueue, 1, in submitInfo, default);
+        vk!.QueueWaitIdle(graphicsQueue);
+
+        vk!.FreeCommandBuffers(device, commandPool, 1, in commandBuffer);
     }
 
     private uint FindMemoryType(uint typeFilter, MemoryPropertyFlags properties)
@@ -762,6 +831,24 @@ unsafe class HelloTriangleApplication
 
             vk!.CmdBindPipeline(commandBuffers[i], PipelineBindPoint.Graphics, graphicsPipeline);
 
+
+            var projectionMatrix = Matrix4x4.CreateOrthographicOffCenter(
+                0,
+                swapChainExtent.Width,
+                swapChainExtent.Height,
+                0,
+                -1.0f,
+                1.0f);
+
+            vk!.CmdPushConstants(
+                commandBuffers[i],
+                pipelineLayout,
+                ShaderStageFlags.VertexBit,
+                0,
+                (uint)Unsafe.SizeOf<Matrix4x4>(),
+                &projectionMatrix);
+
+
             var vertexBuffers = new Buffer[] { vertexBuffer };
             var offsets = new ulong[] { 0 };
 
@@ -771,7 +858,7 @@ unsafe class HelloTriangleApplication
                 vk!.CmdBindVertexBuffers(commandBuffers[i], 0, 1, vertexBuffersPtr, offsetsPtr);
             }
 
-            vk!.CmdDraw(commandBuffers[i], 3, 1, 0, 0);
+            vk!.CmdDraw(commandBuffers[i], (uint) vertices.Length, 1, 0, 0);
 
             vk!.CmdEndRenderPass(commandBuffers[i]);
 
@@ -814,11 +901,12 @@ unsafe class HelloTriangleApplication
 
     private void Render(double delta)
     {
+        currentAbsFrame++;
         app.OnRender();
         DrawFrame(delta);
     }
 
-     private void DrawFrame(double delta)
+    private void DrawFrame(double delta)
     {
         vk!.WaitForFences(device, 1, in inFlightFences![currentFrame], true, ulong.MaxValue);
 
@@ -910,10 +998,11 @@ unsafe class HelloTriangleApplication
      {
          Vector2D<int> framebufferSize = window!.FramebufferSize;
 
-         while (framebufferSize.X == 0 || framebufferSize.Y == 0)
+         if (framebufferSize.X == 0 || framebufferSize.Y == 0)
          {
-             framebufferSize = window.FramebufferSize;
+             Console.WriteLine("[WARN] Window's size is zero (x or y). Can not recreate swap chain.");
              window.DoEvents();
+             return;
          }
 
          vk!.DeviceWaitIdle(device);
