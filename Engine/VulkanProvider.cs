@@ -121,19 +121,41 @@ public unsafe partial class VulkanProvider
         vk!.DeviceWaitIdle(device);
     }
 
-    public void UpdateVertexBuffer(List<Vertex> newVertices)
+    public void UpdateVertexBuffer(List<Mesh> meshes)
     {
-        // Копируем данные в память GPU
         void* data;
-        // Отображаем память буфера в адресное пространство CPU
-        vk.MapMemory(device, vertexBufferMemory, 0, (ulong)(Unsafe.SizeOf<Vertex>() * newVertices.Count), 0, &data);
-        // Копируем наши вершины в отображенную память
-        newVertices.CopyTo(new Span<Vertex>(data, newVertices.Count));
-        // Отменяем отображение
-        vk.UnmapMemory(device, vertexBufferMemory);
 
-        vertsCount = (uint)newVertices.Count;
+        vertsCount = 0;
+        foreach (Mesh mesh in meshes)
+        {
+            vertsCount += (uint)mesh.vertices.Length;
+        }
+
+        int vertexSize = Unsafe.SizeOf<Vertex>();
+
+        vk.MapMemory(device, vertexBufferMemory, 0, (ulong)(vertexSize * vertsCount), 0, &data);
+
+        Vertex* ptr = (Vertex*)data;
+
+        foreach (Mesh mesh in meshes)
+        {
+            mesh.vertices.CopyTo(new Span<Vertex>(ptr, mesh.vertices.Length));
+            ptr += vertexSize * mesh.vertices.Length;
+        }
+
+        vk.UnmapMemory(device, vertexBufferMemory);
     }
+    // public void UpdateVertexBuffer(List<Vertex> newVertices)
+    // {
+    //     void* data;
+    //     vk.MapMemory(device, vertexBufferMemory, 0, (ulong)(Unsafe.SizeOf<Vertex>() * newVertices.Count), 0, &data);
+    //
+    //     newVertices.CopyTo(new Span<Vertex>(data, newVertices.Count));
+    //
+    //     vk.UnmapMemory(device, vertexBufferMemory);
+    //
+    //     vertsCount = (uint)newVertices.Count;
+    // }
 
     private void CleanUp()
     {

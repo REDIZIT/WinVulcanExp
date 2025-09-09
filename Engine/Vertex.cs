@@ -8,6 +8,12 @@ public struct Vertex
     public Vector2D<float> pos;
     public Vector3D<float> color;
 
+    public Vertex(float x, float y)
+    {
+        pos = new(x, y);
+        color = new(1, 0, 0);
+    }
+
     public static Vertex FromPos(float x, float y)
     {
         return new()

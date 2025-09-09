@@ -6,24 +6,9 @@ using Timer = System.Timers.Timer;
 
 public static class Engine
 {
-    public static List<Vertex> verts = new();
-    public static List<int> tris = new();
+    private static List<Mesh> meshes = new();
 
     private static VulkanProvider provider;
-
-
-
-    public static void AddTriangle(int x, int y, int width, int height)
-    {
-        int vertsIndex = verts.Count;
-        verts.Add(Vertex.FromPos(x, y));
-        verts.Add(Vertex.FromPos(x + width / 2, y + height));
-        verts.Add(Vertex.FromPos(x + width, y));
-
-        tris.Add(vertsIndex + 0);
-        tris.Add(vertsIndex + 1);
-        tris.Add(vertsIndex + 2);
-    }
 
     public static void Init()
     {
@@ -39,9 +24,15 @@ public static class Engine
 
         Time.Restart();
 
-        AddTriangle(100, 100, 100, 100);
-        AddTriangle(300, 100, 100, 100);
-        provider.UpdateVertexBuffer(verts);
+        meshes.Add(new()
+        {
+            vertices = new Vertex[]
+            {
+                new(100, 100),
+                new(150, 200),
+                new(200, 50),
+            }
+        });
 
         provider.Run();
     }
@@ -50,9 +41,13 @@ public static class Engine
     {
         Time.OnPreRender();
 
-        float t = Time.deltaTime;
+        float t = Time.timeSinceLoad;
 
-        verts[0] = Vertex.FromPos(50 + (float)Math.Sin(t) * 50, 0);
-        provider.UpdateVertexBuffer(verts);
+        for (int i = 0; i < meshes[0].vertices.Length; i++)
+        {
+            meshes[0].vertices[i].color = new Vector3D<float>(t % 1, 0, 0);
+        }
+
+        provider.UpdateVertexBuffer(meshes);
     }
 }
