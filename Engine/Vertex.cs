@@ -3,10 +3,19 @@ using System.Runtime.InteropServices;
 using Silk.NET.Maths;
 using Silk.NET.Vulkan;
 
-struct Vertex
+public struct Vertex
 {
     public Vector2D<float> pos;
     public Vector3D<float> color;
+
+    public static Vertex FromPos(float x, float y)
+    {
+        return new()
+        {
+            pos = new(x, y),
+            color = Vector3D<float>.One,
+        };
+    }
 
     public static VertexInputBindingDescription GetBindingDescription()
     {

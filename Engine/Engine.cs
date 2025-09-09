@@ -3,7 +3,7 @@ using Silk.NET.Maths;
 
 public static class Engine
 {
-    public static List<Vector2D<int>> verts = new();
+    public static List<Vertex> verts = new();
     public static List<int> tris = new();
 
     private static VulkanProvider provider;
@@ -11,9 +11,9 @@ public static class Engine
     public static void AddTriangle(int x, int y, int width, int height)
     {
         int vertsIndex = verts.Count;
-        verts.Add(new(x, y));
-        verts.Add(new(x + width / 2, y + height));
-        verts.Add(new(x + width, y));
+        verts.Add(Vertex.FromPos(x, y));
+        verts.Add(Vertex.FromPos(x + width / 2, y + height));
+        verts.Add(Vertex.FromPos(x + width, y));
 
         tris.Add(vertsIndex + 0);
         tris.Add(vertsIndex + 1);
@@ -26,6 +26,9 @@ public static class Engine
 
         provider = new VulkanProvider();
         provider.Init();
+
+        provider.UpdateVertexBuffer(verts);
+
         provider.Run();
     }
 

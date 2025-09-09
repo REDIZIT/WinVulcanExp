@@ -14,7 +14,7 @@ using Silk.NET.Windowing;
 using Buffer = Silk.NET.Vulkan.Buffer;
 using Semaphore = Silk.NET.Vulkan.Semaphore;
 
-public unsafe class VulkanProvider
+public unsafe partial class VulkanProvider
 {
     const int MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -117,9 +117,20 @@ public unsafe class VulkanProvider
 
     private void MainLoop()
     {
-
         window!.Run();
         vk!.DeviceWaitIdle(device);
+    }
+
+    public void UpdateVertexBuffer(List<Vertex> newVertices)
+    {
+        // Копируем данные в память GPU
+        void* data;
+        // Отображаем память буфера в адресное пространство CPU
+        vk.MapMemory(device, vertexBufferMemory, 0, (ulong)(Unsafe.SizeOf<Vertex>() * newVertices.Count), 0, &data);
+        // Копируем наши вершины в отображенную память
+        newVertices.CopyTo(new Span<Vertex>(data, newVertices.Count));
+        // Отменяем отображение
+        vk.UnmapMemory(device, vertexBufferMemory);
     }
 
     private void CleanUp()
@@ -192,25 +203,6 @@ public unsafe class VulkanProvider
         }
 
         surface = window!.VkSurface!.Create<AllocationCallbacks>(instance.ToHandle(), null).ToSurface();
-    }
-
-    private void PickPhysicalDevice()
-    {
-        var devices = vk!.GetPhysicalDevices(instance);
-
-        foreach (var device in devices)
-        {
-            if (IsDeviceSuitable(device))
-            {
-                physicalDevice = device;
-                break;
-            }
-        }
-
-        if (physicalDevice.Handle == 0)
-        {
-            throw new Exception("failed to find a suitable GPU!");
-        }
     }
 
     private void CreateLogicalDevice()
@@ -638,23 +630,17 @@ public unsafe class VulkanProvider
 
     private void CreateVertexBuffer()
     {
-        ulong bufferSize = (ulong)(Unsafe.SizeOf<Vertex>() * vertices.Length);
+        // Выделим память под максимальное количество вершин, которое мы можем захотеть отрисовать.
+        // Например, 1000 вершин. Вы не можете легко изменить размер буфера "на лету",
+        // поэтому лучше выделить с запасом.
+        int maxVertices = 1000;
+        ulong bufferSize = (ulong)(Unsafe.SizeOf<Vertex>() * maxVertices);
 
-        Buffer stagingBuffer = default;
-        DeviceMemory stagingBufferMemory = default;
-        CreateBuffer(bufferSize, BufferUsageFlags.TransferSrcBit, MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit, ref stagingBuffer, ref stagingBufferMemory);
-
-        void* data;
-        vk!.MapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
-        vertices.AsSpan().CopyTo(new Span<Vertex>(data, vertices.Length));
-        vk!.UnmapMemory(device, stagingBufferMemory);
-
-        CreateBuffer(bufferSize, BufferUsageFlags.TransferDstBit | BufferUsageFlags.VertexBufferBit, MemoryPropertyFlags.DeviceLocalBit, ref vertexBuffer, ref vertexBufferMemory);
-
-        CopyBuffer(stagingBuffer, vertexBuffer, bufferSize);
-
-        vk!.DestroyBuffer(device, stagingBuffer, null);
-        vk!.FreeMemory(device, stagingBufferMemory, null);
+        // Создаем буфер в памяти, видимой для хоста (CPU), чтобы мы могли в нее писать.
+        // HOST_COHERENT означает, что нам не нужно вручную сбрасывать кэши.
+        CreateBuffer(bufferSize, BufferUsageFlags.VertexBufferBit,
+            MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
+            ref vertexBuffer, ref vertexBufferMemory);
     }
 
     private void CreateBuffer(ulong size, BufferUsageFlags usage, MemoryPropertyFlags properties, ref Buffer buffer, ref DeviceMemory bufferMemory)
@@ -774,79 +760,79 @@ public unsafe class VulkanProvider
         }
 
 
-        for (int i = 0; i < commandBuffers.Length; i++)
-        {
-            CommandBufferBeginInfo beginInfo = new()
-            {
-                SType = StructureType.CommandBufferBeginInfo,
-            };
-
-            if (vk!.BeginCommandBuffer(commandBuffers[i], in beginInfo) != Result.Success)
-            {
-                throw new Exception("failed to begin recording command buffer!");
-            }
-
-            RenderPassBeginInfo renderPassInfo = new()
-            {
-                SType = StructureType.RenderPassBeginInfo,
-                RenderPass = renderPass,
-                Framebuffer = swapChainFramebuffers[i],
-                RenderArea =
-                {
-                    Offset = { X = 0, Y = 0 },
-                    Extent = swapChainExtent,
-                }
-            };
-
-            ClearValue clearColor = new()
-            {
-                Color = new() { Float32_0 = 0, Float32_1 = 0, Float32_2 = 0, Float32_3 = 1 },
-            };
-
-            renderPassInfo.ClearValueCount = 1;
-            renderPassInfo.PClearValues = &clearColor;
-
-            vk!.CmdBeginRenderPass(commandBuffers[i], &renderPassInfo, SubpassContents.Inline);
-
-            vk!.CmdBindPipeline(commandBuffers[i], PipelineBindPoint.Graphics, graphicsPipeline);
-
-
-            var projectionMatrix = Matrix4x4.CreateOrthographicOffCenter(
-                0,
-                swapChainExtent.Width,
-                swapChainExtent.Height,
-                0,
-                -1.0f,
-                1.0f);
-
-            vk!.CmdPushConstants(
-                commandBuffers[i],
-                pipelineLayout,
-                ShaderStageFlags.VertexBit,
-                0,
-                (uint)Unsafe.SizeOf<Matrix4x4>(),
-                &projectionMatrix);
-
-
-            var vertexBuffers = new Buffer[] { vertexBuffer };
-            var offsets = new ulong[] { 0 };
-
-            fixed (ulong* offsetsPtr = offsets)
-            fixed (Buffer* vertexBuffersPtr = vertexBuffers)
-            {
-                vk!.CmdBindVertexBuffers(commandBuffers[i], 0, 1, vertexBuffersPtr, offsetsPtr);
-            }
-
-            vk!.CmdDraw(commandBuffers[i], (uint) vertices.Length, 1, 0, 0);
-
-            vk!.CmdEndRenderPass(commandBuffers[i]);
-
-            if (vk!.EndCommandBuffer(commandBuffers[i]) != Result.Success)
-            {
-                throw new Exception("failed to record command buffer!");
-            }
-
-        }
+        // for (int i = 0; i < commandBuffers.Length; i++)
+        // {
+        //     CommandBufferBeginInfo beginInfo = new()
+        //     {
+        //         SType = StructureType.CommandBufferBeginInfo,
+        //     };
+        //
+        //     if (vk!.BeginCommandBuffer(commandBuffers[i], in beginInfo) != Result.Success)
+        //     {
+        //         throw new Exception("failed to begin recording command buffer!");
+        //     }
+        //
+        //     RenderPassBeginInfo renderPassInfo = new()
+        //     {
+        //         SType = StructureType.RenderPassBeginInfo,
+        //         RenderPass = renderPass,
+        //         Framebuffer = swapChainFramebuffers[i],
+        //         RenderArea =
+        //         {
+        //             Offset = { X = 0, Y = 0 },
+        //             Extent = swapChainExtent,
+        //         }
+        //     };
+        //
+        //     ClearValue clearColor = new()
+        //     {
+        //         Color = new() { Float32_0 = 0, Float32_1 = 0, Float32_2 = 0, Float32_3 = 1 },
+        //     };
+        //
+        //     renderPassInfo.ClearValueCount = 1;
+        //     renderPassInfo.PClearValues = &clearColor;
+        //
+        //     vk!.CmdBeginRenderPass(commandBuffers[i], &renderPassInfo, SubpassContents.Inline);
+        //
+        //     vk!.CmdBindPipeline(commandBuffers[i], PipelineBindPoint.Graphics, graphicsPipeline);
+        //
+        //
+        //     var projectionMatrix = Matrix4x4.CreateOrthographicOffCenter(
+        //         0,
+        //         swapChainExtent.Width,
+        //         swapChainExtent.Height,
+        //         0,
+        //         -1.0f,
+        //         1.0f);
+        //
+        //     vk!.CmdPushConstants(
+        //         commandBuffers[i],
+        //         pipelineLayout,
+        //         ShaderStageFlags.VertexBit,
+        //         0,
+        //         (uint)Unsafe.SizeOf<Matrix4x4>(),
+        //         &projectionMatrix);
+        //
+        //
+        //     var vertexBuffers = new Buffer[] { vertexBuffer };
+        //     var offsets = new ulong[] { 0 };
+        //
+        //     fixed (ulong* offsetsPtr = offsets)
+        //     fixed (Buffer* vertexBuffersPtr = vertexBuffers)
+        //     {
+        //         vk!.CmdBindVertexBuffers(commandBuffers[i], 0, 1, vertexBuffersPtr, offsetsPtr);
+        //     }
+        //
+        //     vk!.CmdDraw(commandBuffers[i], (uint) vertices.Length, 1, 0, 0);
+        //
+        //     vk!.CmdEndRenderPass(commandBuffers[i]);
+        //
+        //     if (vk!.EndCommandBuffer(commandBuffers[i]) != Result.Success)
+        //     {
+        //         throw new Exception("failed to record command buffer!");
+        //     }
+        //
+        // }
     }
 
     private void CreateSyncObjects()
@@ -887,21 +873,92 @@ public unsafe class VulkanProvider
 
     private void DrawFrame(double delta)
     {
+        if (TryNextSpawnChainImage(out uint imageIndex) == false) return;
+        RecordCommandBuffer(imageIndex);
+        MagicDrawFrame(imageIndex);
+    }
+
+    private bool TryNextSpawnChainImage(out uint imageIndex)
+    {
         vk!.WaitForFences(device, 1, in inFlightFences![currentFrame], true, ulong.MaxValue);
 
-        uint imageIndex = 0;
-        var result = khrSwapChain!.AcquireNextImage(device, swapChain, ulong.MaxValue, imageAvailableSemaphores![currentFrame], default, ref imageIndex);
+        imageIndex = 0;
+        Result result = khrSwapChain!.AcquireNextImage(device, swapChain, ulong.MaxValue, imageAvailableSemaphores![currentFrame], default, ref imageIndex);
 
         if (result == Result.ErrorOutOfDateKhr)
         {
             RecreateSwapChain();
-            return;
+            return false;
         }
         else if (result != Result.Success && result != Result.SuboptimalKhr)
         {
             throw new Exception("failed to acquire swap chain image!");
         }
 
+        return true;
+    }
+
+    private void RecordCommandBuffer(uint imageIndex)
+    {
+        // 1. Создаем новые данные для вершин. Для примера, будем вращать наш треугольник.
+        // float time = currentAbsFrame * 0.001f;
+        // Vertex[] vertices = new Vertex[]
+        // {
+        //     new Vertex { pos = new Vector2D<float>(400 + 200 * MathF.Sin(time), 300 + 200 * MathF.Cos(time)), color = new Vector3D<float>(1.0f, 0.0f, 0.0f) },
+        //     new Vertex { pos = new Vector2D<float>(400 + 200 * MathF.Sin(time + 2.1f), 300 + 200 * MathF.Cos(time + 2.1f)), color = new Vector3D<float>(0.0f, 1.0f, 0.0f) },
+        //     new Vertex { pos = new Vector2D<float>(400 + 200 * MathF.Sin(time + 4.2f), 300 + 200 * MathF.Cos(time + 4.2f)), color = new Vector3D<float>(0.0f, 0.0f, 1.0f) },
+        // };
+        //
+        // // 2. Обновляем вершинный буфер на GPU
+        // UpdateVertexBuffer(vertices);
+
+        // 3. Перезаписываем командный буфер
+        var commandBuffer = commandBuffers![imageIndex];
+
+        // Сбрасываем командный буфер перед новой записью
+        vk.ResetCommandBuffer(commandBuffer, 0);
+
+        CommandBufferBeginInfo beginInfo = new() { SType = StructureType.CommandBufferBeginInfo };
+        Result result = vk.BeginCommandBuffer(commandBuffer, in beginInfo);
+        Assert.Success(result, "Begin recording command buffer");
+
+        RenderPassBeginInfo renderPassInfo = new()
+        {
+            SType = StructureType.RenderPassBeginInfo,
+            RenderPass = renderPass,
+            Framebuffer = swapChainFramebuffers[imageIndex],
+            RenderArea = { Offset = { X = 0, Y = 0 }, Extent = swapChainExtent }
+        };
+
+        ClearValue clearColor = new() { Color = new() { Float32_0 = 0, Float32_1 = 0, Float32_2 = 0, Float32_3 = 1 }};
+        renderPassInfo.ClearValueCount = 1;
+        renderPassInfo.PClearValues = &clearColor;
+
+        vk.CmdBeginRenderPass(commandBuffer, &renderPassInfo, SubpassContents.Inline);
+        vk.CmdBindPipeline(commandBuffer, PipelineBindPoint.Graphics, graphicsPipeline);
+
+        var projectionMatrix = Matrix4x4.CreateOrthographicOffCenter(0, swapChainExtent.Width, swapChainExtent.Height, 0, -1.0f, 1.0f);
+        vk.CmdPushConstants(commandBuffer, pipelineLayout, ShaderStageFlags.VertexBit, 0, (uint)Unsafe.SizeOf<Matrix4x4>(), &projectionMatrix);
+
+        var vertexBuffers = new Buffer[] { vertexBuffer };
+        var offsets = new ulong[] { 0 };
+        fixed (ulong* offsetsPtr = offsets)
+        fixed (Buffer* vertexBuffersPtr = vertexBuffers)
+        {
+            vk.CmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffersPtr, offsetsPtr);
+        }
+
+        // Используем актуальное количество вершин
+        vk.CmdDraw(commandBuffer, 3, 1, 0, 0);
+
+        vk.CmdEndRenderPass(commandBuffer);
+
+        result = vk.EndCommandBuffer(commandBuffer);
+        Assert.Success(result, "End command buffer");
+    }
+
+    private void MagicDrawFrame(uint imageIndex)
+    {
         if (imagesInFlight![imageIndex].Handle != default)
         {
             vk!.WaitForFences(device, 1, in imagesInFlight[imageIndex], true, ulong.MaxValue);
@@ -957,7 +1014,7 @@ public unsafe class VulkanProvider
             PImageIndices = &imageIndex
         };
 
-        result = khrSwapChain.QueuePresent(presentQueue, in presentInfo);
+        Result result = khrSwapChain.QueuePresent(presentQueue, in presentInfo);
 
         if (result == Result.ErrorOutOfDateKhr || result == Result.SuboptimalKhr || frameBufferResized)
         {
@@ -970,8 +1027,8 @@ public unsafe class VulkanProvider
         }
 
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-
     }
+
 
     private void RecreateSwapChain()
     {
@@ -1044,184 +1101,5 @@ public unsafe class VulkanProvider
 
         return shaderModule;
 
-    }
-
-    private SurfaceFormatKHR ChooseSwapSurfaceFormat(IReadOnlyList<SurfaceFormatKHR> availableFormats)
-    {
-        foreach (var availableFormat in availableFormats)
-        {
-            if (availableFormat.Format == Format.B8G8R8A8Srgb && availableFormat.ColorSpace == ColorSpaceKHR.SpaceSrgbNonlinearKhr)
-            {
-                return availableFormat;
-            }
-        }
-
-        return availableFormats[0];
-    }
-
-    private PresentModeKHR ChoosePresentMode(IReadOnlyList<PresentModeKHR> availablePresentModes)
-    {
-        foreach (var availablePresentMode in availablePresentModes)
-        {
-            if (availablePresentMode == PresentModeKHR.MailboxKhr)
-            {
-                return availablePresentMode;
-            }
-        }
-
-        return PresentModeKHR.FifoKhr;
-    }
-
-    private Extent2D ChooseSwapExtent(SurfaceCapabilitiesKHR capabilities)
-    {
-        if (capabilities.CurrentExtent.Width != uint.MaxValue)
-        {
-            return capabilities.CurrentExtent;
-        }
-        else
-        {
-            var framebufferSize = window!.FramebufferSize;
-
-            Extent2D actualExtent = new()
-            {
-                Width = (uint)framebufferSize.X,
-                Height = (uint)framebufferSize.Y
-            };
-
-            actualExtent.Width = Math.Clamp(actualExtent.Width, capabilities.MinImageExtent.Width, capabilities.MaxImageExtent.Width);
-            actualExtent.Height = Math.Clamp(actualExtent.Height, capabilities.MinImageExtent.Height, capabilities.MaxImageExtent.Height);
-
-            return actualExtent;
-        }
-    }
-
-    private SwapChainSupportDetails QuerySwapChainSupport(PhysicalDevice physicalDevice)
-    {
-        var details = new SwapChainSupportDetails();
-
-        khrSurface!.GetPhysicalDeviceSurfaceCapabilities(physicalDevice, surface, out details.Capabilities);
-
-        uint formatCount = 0;
-        khrSurface.GetPhysicalDeviceSurfaceFormats(physicalDevice, surface, ref formatCount, null);
-
-        if (formatCount != 0)
-        {
-            details.Formats = new SurfaceFormatKHR[formatCount];
-            fixed (SurfaceFormatKHR* formatsPtr = details.Formats)
-            {
-                khrSurface.GetPhysicalDeviceSurfaceFormats(physicalDevice, surface, ref formatCount, formatsPtr);
-            }
-        }
-        else
-        {
-            details.Formats = Array.Empty<SurfaceFormatKHR>();
-        }
-
-        uint presentModeCount = 0;
-        khrSurface.GetPhysicalDeviceSurfacePresentModes(physicalDevice, surface, ref presentModeCount, null);
-
-        if (presentModeCount != 0)
-        {
-            details.PresentModes = new PresentModeKHR[presentModeCount];
-            fixed (PresentModeKHR* formatsPtr = details.PresentModes)
-            {
-                khrSurface.GetPhysicalDeviceSurfacePresentModes(physicalDevice, surface, ref presentModeCount, formatsPtr);
-            }
-
-        }
-        else
-        {
-            details.PresentModes = Array.Empty<PresentModeKHR>();
-        }
-
-        return details;
-    }
-
-    private bool IsDeviceSuitable(PhysicalDevice device)
-    {
-        var indices = FindQueueFamilies(device);
-
-        bool extensionsSupported = CheckDeviceExtensionsSupport(device);
-
-        bool swapChainAdequate = false;
-        if (extensionsSupported)
-        {
-            var swapChainSupport = QuerySwapChainSupport(device);
-            swapChainAdequate = swapChainSupport.Formats.Any() && swapChainSupport.PresentModes.Any();
-        }
-
-        return indices.IsComplete() && extensionsSupported && swapChainAdequate;
-    }
-
-    private bool CheckDeviceExtensionsSupport(PhysicalDevice device)
-    {
-        uint extentionsCount = 0;
-        vk!.EnumerateDeviceExtensionProperties(device, (byte*)null, ref extentionsCount, null);
-
-        var availableExtensions = new ExtensionProperties[extentionsCount];
-        fixed (ExtensionProperties* availableExtensionsPtr = availableExtensions)
-        {
-            vk!.EnumerateDeviceExtensionProperties(device, (byte*)null, ref extentionsCount, availableExtensionsPtr);
-        }
-
-        var availableExtensionNames = availableExtensions.Select(extension => Marshal.PtrToStringAnsi((IntPtr)extension.ExtensionName)).ToHashSet();
-
-        return deviceExtensions.All(availableExtensionNames.Contains);
-
-    }
-
-    private QueueFamilyIndices FindQueueFamilies(PhysicalDevice device)
-    {
-        var indices = new QueueFamilyIndices();
-
-        uint queueFamilityCount = 0;
-        vk!.GetPhysicalDeviceQueueFamilyProperties(device, ref queueFamilityCount, null);
-
-        var queueFamilies = new QueueFamilyProperties[queueFamilityCount];
-        fixed (QueueFamilyProperties* queueFamiliesPtr = queueFamilies)
-        {
-            vk!.GetPhysicalDeviceQueueFamilyProperties(device, ref queueFamilityCount, queueFamiliesPtr);
-        }
-
-
-        uint i = 0;
-        foreach (var queueFamily in queueFamilies)
-        {
-            if (queueFamily.QueueFlags.HasFlag(QueueFlags.GraphicsBit))
-            {
-                indices.GraphicsFamily = i;
-            }
-
-            khrSurface!.GetPhysicalDeviceSurfaceSupport(device, i, surface, out var presentSupport);
-
-            if (presentSupport)
-            {
-                indices.PresentFamily = i;
-            }
-
-            if (indices.IsComplete())
-            {
-                break;
-            }
-
-            i++;
-        }
-
-        return indices;
-    }
-
-    private string[] GetRequiredExtensions()
-    {
-        var glfwExtensions = window!.VkSurface!.GetRequiredExtensions(out var glfwExtensionCount);
-        var extensions = SilkMarshal.PtrToStringArray((nint)glfwExtensions, (int)glfwExtensionCount);
-
-        return extensions;
-    }
-
-    private uint DebugCallback(DebugUtilsMessageSeverityFlagsEXT messageSeverity, DebugUtilsMessageTypeFlagsEXT messageTypes, DebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData)
-    {
-        Console.WriteLine($"validation layer:" + Marshal.PtrToStringAnsi((nint)pCallbackData->PMessage));
-
-        return Vk.False;
     }
 }
