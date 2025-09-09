@@ -1,30 +1,21 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Timers;
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
 using Silk.NET.Maths;
 using Silk.NET.Vulkan;
-using Silk.NET.Vulkan.Extensions.EXT;
 using Silk.NET.Vulkan.Extensions.KHR;
 using Silk.NET.Windowing;
 using Buffer = Silk.NET.Vulkan.Buffer;
 using Semaphore = Silk.NET.Vulkan.Semaphore;
 
-var app = new HelloTriangleApplication();
-app.Run();
-
-unsafe class HelloTriangleApplication
+public unsafe class VulkanProvider
 {
-    const int WIDTH = 800;
-    const int HEIGHT = 600;
-
     const int MAX_FRAMES_IN_FLIGHT = 2;
 
     private readonly string[] deviceExtensions = new[]
@@ -72,20 +63,16 @@ unsafe class HelloTriangleApplication
     private int currentFrame = 0;
 
     private int currentAbsFrame;
-    private App app = new();
     private bool frameBufferResized = false;
 
-    private Vertex[] vertices = new Vertex[]
-    {
-        new Vertex { pos = new Vector2D<float>(0,0), color = new Vector3D<float>(1.0f, 0.0f, 0.0f) },
-        new Vertex { pos = new Vector2D<float>(100,200), color = new Vector3D<float>(0.0f, 1.0f, 0.0f) },
-        new Vertex { pos = new Vector2D<float>(200,0), color = new Vector3D<float>(0.0f, 0.0f, 1.0f) },
-    };
-
-    public void Run()
+    public void Init()
     {
         InitWindow();
         InitVulkan();
+    }
+
+    public void Run()
+    {
         MainLoop();
         CleanUp();
     }
@@ -95,7 +82,7 @@ unsafe class HelloTriangleApplication
         //Create a window.
         var options = WindowOptions.DefaultVulkan with
         {
-            Size = new Vector2D<int>(WIDTH, HEIGHT),
+            Size = new Vector2D<int>(800, 600),
             Title = "Vulkan"
         };
 
@@ -123,22 +110,14 @@ unsafe class HelloTriangleApplication
         CreateVertexBuffer();
         CreateCommandBuffers();
         CreateSyncObjects();
+
+        window!.Render += Render;
+        window!.Resize += (_) => RecreateSwapChain();
     }
 
     private void MainLoop()
     {
-        System.Timers.Timer timer = new System.Timers.Timer(1000);
-        int prevFrame = currentAbsFrame;
-        timer.Elapsed += (_, _) =>
-        {
-            int deltaFrames = currentAbsFrame - prevFrame;
-            prevFrame = currentAbsFrame;
-            Console.WriteLine("FPS: " + deltaFrames);
-        };
-        timer.Start();
 
-        window!.Render += Render;
-        window!.Resize += (_) => RecreateSwapChain();
         window!.Run();
         vk!.DeviceWaitIdle(device);
     }
@@ -902,7 +881,7 @@ unsafe class HelloTriangleApplication
     private void Render(double delta)
     {
         currentAbsFrame++;
-        app.OnRender();
+        Engine.OnPreRender();
         DrawFrame(delta);
     }
 
@@ -994,54 +973,54 @@ unsafe class HelloTriangleApplication
 
     }
 
-     private void RecreateSwapChain()
-     {
-         Vector2D<int> framebufferSize = window!.FramebufferSize;
+    private void RecreateSwapChain()
+    {
+        Vector2D<int> framebufferSize = window!.FramebufferSize;
 
-         if (framebufferSize.X == 0 || framebufferSize.Y == 0)
-         {
-             Console.WriteLine("[WARN] Window's size is zero (x or y). Can not recreate swap chain.");
-             window.DoEvents();
-             return;
-         }
+        if (framebufferSize.X == 0 || framebufferSize.Y == 0)
+        {
+            Console.WriteLine("[WARN] Window's size is zero (x or y). Can not recreate swap chain.");
+            window.DoEvents();
+            return;
+        }
 
-         vk!.DeviceWaitIdle(device);
+        vk!.DeviceWaitIdle(device);
 
-         CleanUpSwapChain();
+        CleanUpSwapChain();
 
-         CreateSwapChain();
-         CreateImageViews();
-         CreateRenderPass();
-         CreateGraphicsPipeline();
-         CreateFramebuffers();
-         CreateCommandBuffers();
+        CreateSwapChain();
+        CreateImageViews();
+        CreateRenderPass();
+        CreateGraphicsPipeline();
+        CreateFramebuffers();
+        CreateCommandBuffers();
 
-         imagesInFlight = new Fence[swapChainImages!.Length];
-     }
+        imagesInFlight = new Fence[swapChainImages!.Length];
+    }
 
-     private void CleanUpSwapChain()
-     {
-         foreach (var framebuffer in swapChainFramebuffers!)
-         {
-             vk!.DestroyFramebuffer(device, framebuffer, null);
-         }
+    private void CleanUpSwapChain()
+    {
+        foreach (var framebuffer in swapChainFramebuffers!)
+        {
+            vk!.DestroyFramebuffer(device, framebuffer, null);
+        }
 
-         fixed (CommandBuffer* commandBuffersPtr = commandBuffers)
-         {
-             vk!.FreeCommandBuffers(device, commandPool, (uint)commandBuffers!.Length, commandBuffersPtr);
-         }
+        fixed (CommandBuffer* commandBuffersPtr = commandBuffers)
+        {
+            vk!.FreeCommandBuffers(device, commandPool, (uint)commandBuffers!.Length, commandBuffersPtr);
+        }
 
-         vk!.DestroyPipeline(device, graphicsPipeline, null);
-         vk!.DestroyPipelineLayout(device, pipelineLayout, null);
-         vk!.DestroyRenderPass(device, renderPass, null);
+        vk!.DestroyPipeline(device, graphicsPipeline, null);
+        vk!.DestroyPipelineLayout(device, pipelineLayout, null);
+        vk!.DestroyRenderPass(device, renderPass, null);
 
-         foreach (var imageView in swapChainImageViews!)
-         {
-             vk!.DestroyImageView(device, imageView, null);
-         }
+        foreach (var imageView in swapChainImageViews!)
+        {
+            vk!.DestroyImageView(device, imageView, null);
+        }
 
-         khrSwapChain!.DestroySwapchain(device, swapChain, null);
-     }
+        khrSwapChain!.DestroySwapchain(device, swapChain, null);
+    }
 
     private ShaderModule CreateShaderModule(byte[] code)
     {
