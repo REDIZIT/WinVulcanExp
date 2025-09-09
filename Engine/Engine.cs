@@ -1,5 +1,8 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
+using System.Timers;
 using Silk.NET.Maths;
+using Timer = System.Timers.Timer;
 
 public static class Engine
 {
@@ -8,7 +11,7 @@ public static class Engine
 
     private static VulkanProvider provider;
 
-    private static int currentAbsFrame;
+
 
     public static void AddTriangle(int x, int y, int width, int height)
     {
@@ -27,6 +30,15 @@ public static class Engine
         provider = new VulkanProvider();
         provider.Init();
 
+        Timer timer = new Timer(1000);
+        timer.Elapsed += (_, _) =>
+        {
+            Console.WriteLine("FPS: ~" + (1f / Time.deltaTime));
+        };
+        timer.Start();
+
+        Time.Restart();
+
         AddTriangle(100, 100, 100, 100);
         AddTriangle(300, 100, 100, 100);
         provider.UpdateVertexBuffer(verts);
@@ -36,6 +48,11 @@ public static class Engine
 
     public static void OnPreRender()
     {
-        currentAbsFrame++;
+        Time.OnPreRender();
+
+        float t = Time.deltaTime;
+
+        verts[0] = Vertex.FromPos(50 + (float)Math.Sin(t) * 50, 0);
+        provider.UpdateVertexBuffer(verts);
     }
 }
