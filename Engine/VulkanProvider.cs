@@ -62,8 +62,8 @@ public unsafe partial class VulkanProvider
     private Fence[]? imagesInFlight;
     private int currentFrame = 0;
 
-    private int currentAbsFrame;
     private bool frameBufferResized = false;
+    private uint vertsCount;
 
     public void Init()
     {
@@ -131,6 +131,8 @@ public unsafe partial class VulkanProvider
         newVertices.CopyTo(new Span<Vertex>(data, newVertices.Count));
         // Отменяем отображение
         vk.UnmapMemory(device, vertexBufferMemory);
+
+        vertsCount = (uint)newVertices.Count;
     }
 
     private void CleanUp()
@@ -308,15 +310,14 @@ public unsafe partial class VulkanProvider
             OldSwapchain = default
         };
 
+
         if (!vk!.TryGetDeviceExtension(instance, device, out khrSwapChain))
         {
             throw new NotSupportedException("VK_KHR_swapchain extension not found.");
         }
 
-        if (khrSwapChain!.CreateSwapchain(device, in creatInfo, null, out swapChain) != Result.Success)
-        {
-            throw new Exception("failed to create swap chain!");
-        }
+        Result result = khrSwapChain!.CreateSwapchain(device, in creatInfo, null, out swapChain);
+        Assert.Success(result, "Create swap chain");
 
         khrSwapChain.GetSwapchainImages(device, swapChain, ref imageCount, null);
         swapChainImages = new Image[imageCount];
@@ -413,10 +414,8 @@ public unsafe partial class VulkanProvider
             PDependencies = &dependency,
         };
 
-        if (vk!.CreateRenderPass(device, in renderPassInfo, null, out renderPass) != Result.Success)
-        {
-            throw new Exception("failed to create render pass!");
-        }
+        Result result = vk!.CreateRenderPass(device, in renderPassInfo, null, out renderPass);
+        Assert.Success(result, "Create render pass");
     }
 
     private void CreateGraphicsPipeline()
@@ -643,102 +642,6 @@ public unsafe partial class VulkanProvider
             ref vertexBuffer, ref vertexBufferMemory);
     }
 
-    private void CreateBuffer(ulong size, BufferUsageFlags usage, MemoryPropertyFlags properties, ref Buffer buffer, ref DeviceMemory bufferMemory)
-    {
-        BufferCreateInfo bufferInfo = new()
-        {
-            SType = StructureType.BufferCreateInfo,
-            Size = size,
-            Usage = usage,
-            SharingMode = SharingMode.Exclusive,
-        };
-
-        fixed (Buffer* bufferPtr = &buffer)
-        {
-            if (vk!.CreateBuffer(device, in bufferInfo, null, bufferPtr) != Result.Success)
-            {
-                throw new Exception("failed to create vertex buffer!");
-            }
-        }
-
-        MemoryRequirements memRequirements = new();
-        vk!.GetBufferMemoryRequirements(device, buffer, out memRequirements);
-
-        MemoryAllocateInfo allocateInfo = new()
-        {
-            SType = StructureType.MemoryAllocateInfo,
-            AllocationSize = memRequirements.Size,
-            MemoryTypeIndex = FindMemoryType(memRequirements.MemoryTypeBits, properties),
-        };
-
-        fixed (DeviceMemory* bufferMemoryPtr = &bufferMemory)
-        {
-            if (vk!.AllocateMemory(device, in allocateInfo, null, bufferMemoryPtr) != Result.Success)
-            {
-                throw new Exception("failed to allocate vertex buffer memory!");
-            }
-        }
-
-        vk!.BindBufferMemory(device, buffer, bufferMemory, 0);
-    }
-
-    private void CopyBuffer(Buffer srcBuffer, Buffer dstBuffer, ulong size)
-    {
-        CommandBufferAllocateInfo allocateInfo = new()
-        {
-            SType = StructureType.CommandBufferAllocateInfo,
-            Level = CommandBufferLevel.Primary,
-            CommandPool = commandPool,
-            CommandBufferCount = 1,
-        };
-
-        vk!.AllocateCommandBuffers(device, in allocateInfo, out CommandBuffer commandBuffer);
-
-        CommandBufferBeginInfo beginInfo = new()
-        {
-            SType = StructureType.CommandBufferBeginInfo,
-            Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
-        };
-
-        vk!.BeginCommandBuffer(commandBuffer, in beginInfo);
-
-        BufferCopy copyRegion = new()
-        {
-            Size = size,
-        };
-
-        vk!.CmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, in copyRegion);
-
-        vk!.EndCommandBuffer(commandBuffer);
-
-        SubmitInfo submitInfo = new()
-        {
-            SType = StructureType.SubmitInfo,
-            CommandBufferCount = 1,
-            PCommandBuffers = &commandBuffer,
-        };
-
-        vk!.QueueSubmit(graphicsQueue, 1, in submitInfo, default);
-        vk!.QueueWaitIdle(graphicsQueue);
-
-        vk!.FreeCommandBuffers(device, commandPool, 1, in commandBuffer);
-    }
-
-    private uint FindMemoryType(uint typeFilter, MemoryPropertyFlags properties)
-    {
-        vk!.GetPhysicalDeviceMemoryProperties(physicalDevice, out PhysicalDeviceMemoryProperties memProperties);
-
-        for (int i = 0; i < memProperties.MemoryTypeCount; i++)
-        {
-            if ((typeFilter & (1 << i)) != 0 && (memProperties.MemoryTypes[i].PropertyFlags & properties) == properties)
-            {
-                return (uint)i;
-            }
-        }
-
-        throw new Exception("failed to find suitable memory type!");
-    }
-
     private void CreateCommandBuffers()
     {
         commandBuffers = new CommandBuffer[swapChainFramebuffers!.Length];
@@ -753,86 +656,9 @@ public unsafe partial class VulkanProvider
 
         fixed (CommandBuffer* commandBuffersPtr = commandBuffers)
         {
-            if (vk!.AllocateCommandBuffers(device, in allocInfo, commandBuffersPtr) != Result.Success)
-            {
-                throw new Exception("failed to allocate command buffers!");
-            }
+            Result result = vk!.AllocateCommandBuffers(device, in allocInfo, commandBuffersPtr);
+            Assert.Success(result, "Allocate command buffers");
         }
-
-
-        // for (int i = 0; i < commandBuffers.Length; i++)
-        // {
-        //     CommandBufferBeginInfo beginInfo = new()
-        //     {
-        //         SType = StructureType.CommandBufferBeginInfo,
-        //     };
-        //
-        //     if (vk!.BeginCommandBuffer(commandBuffers[i], in beginInfo) != Result.Success)
-        //     {
-        //         throw new Exception("failed to begin recording command buffer!");
-        //     }
-        //
-        //     RenderPassBeginInfo renderPassInfo = new()
-        //     {
-        //         SType = StructureType.RenderPassBeginInfo,
-        //         RenderPass = renderPass,
-        //         Framebuffer = swapChainFramebuffers[i],
-        //         RenderArea =
-        //         {
-        //             Offset = { X = 0, Y = 0 },
-        //             Extent = swapChainExtent,
-        //         }
-        //     };
-        //
-        //     ClearValue clearColor = new()
-        //     {
-        //         Color = new() { Float32_0 = 0, Float32_1 = 0, Float32_2 = 0, Float32_3 = 1 },
-        //     };
-        //
-        //     renderPassInfo.ClearValueCount = 1;
-        //     renderPassInfo.PClearValues = &clearColor;
-        //
-        //     vk!.CmdBeginRenderPass(commandBuffers[i], &renderPassInfo, SubpassContents.Inline);
-        //
-        //     vk!.CmdBindPipeline(commandBuffers[i], PipelineBindPoint.Graphics, graphicsPipeline);
-        //
-        //
-        //     var projectionMatrix = Matrix4x4.CreateOrthographicOffCenter(
-        //         0,
-        //         swapChainExtent.Width,
-        //         swapChainExtent.Height,
-        //         0,
-        //         -1.0f,
-        //         1.0f);
-        //
-        //     vk!.CmdPushConstants(
-        //         commandBuffers[i],
-        //         pipelineLayout,
-        //         ShaderStageFlags.VertexBit,
-        //         0,
-        //         (uint)Unsafe.SizeOf<Matrix4x4>(),
-        //         &projectionMatrix);
-        //
-        //
-        //     var vertexBuffers = new Buffer[] { vertexBuffer };
-        //     var offsets = new ulong[] { 0 };
-        //
-        //     fixed (ulong* offsetsPtr = offsets)
-        //     fixed (Buffer* vertexBuffersPtr = vertexBuffers)
-        //     {
-        //         vk!.CmdBindVertexBuffers(commandBuffers[i], 0, 1, vertexBuffersPtr, offsetsPtr);
-        //     }
-        //
-        //     vk!.CmdDraw(commandBuffers[i], (uint) vertices.Length, 1, 0, 0);
-        //
-        //     vk!.CmdEndRenderPass(commandBuffers[i]);
-        //
-        //     if (vk!.EndCommandBuffer(commandBuffers[i]) != Result.Success)
-        //     {
-        //         throw new Exception("failed to record command buffer!");
-        //     }
-        //
-        // }
     }
 
     private void CreateSyncObjects()
@@ -866,7 +692,6 @@ public unsafe partial class VulkanProvider
 
     private void Render(double delta)
     {
-        currentAbsFrame++;
         Engine.OnPreRender();
         DrawFrame(delta);
     }
@@ -900,20 +725,8 @@ public unsafe partial class VulkanProvider
 
     private void RecordCommandBuffer(uint imageIndex)
     {
-        // 1. Создаем новые данные для вершин. Для примера, будем вращать наш треугольник.
-        // float time = currentAbsFrame * 0.001f;
-        // Vertex[] vertices = new Vertex[]
-        // {
-        //     new Vertex { pos = new Vector2D<float>(400 + 200 * MathF.Sin(time), 300 + 200 * MathF.Cos(time)), color = new Vector3D<float>(1.0f, 0.0f, 0.0f) },
-        //     new Vertex { pos = new Vector2D<float>(400 + 200 * MathF.Sin(time + 2.1f), 300 + 200 * MathF.Cos(time + 2.1f)), color = new Vector3D<float>(0.0f, 1.0f, 0.0f) },
-        //     new Vertex { pos = new Vector2D<float>(400 + 200 * MathF.Sin(time + 4.2f), 300 + 200 * MathF.Cos(time + 4.2f)), color = new Vector3D<float>(0.0f, 0.0f, 1.0f) },
-        // };
-        //
-        // // 2. Обновляем вершинный буфер на GPU
-        // UpdateVertexBuffer(vertices);
-
         // 3. Перезаписываем командный буфер
-        var commandBuffer = commandBuffers![imageIndex];
+        CommandBuffer commandBuffer = commandBuffers![imageIndex];
 
         // Сбрасываем командный буфер перед новой записью
         vk.ResetCommandBuffer(commandBuffer, 0);
@@ -937,9 +750,11 @@ public unsafe partial class VulkanProvider
         vk.CmdBeginRenderPass(commandBuffer, &renderPassInfo, SubpassContents.Inline);
         vk.CmdBindPipeline(commandBuffer, PipelineBindPoint.Graphics, graphicsPipeline);
 
+        // Push constants
         var projectionMatrix = Matrix4x4.CreateOrthographicOffCenter(0, swapChainExtent.Width, swapChainExtent.Height, 0, -1.0f, 1.0f);
         vk.CmdPushConstants(commandBuffer, pipelineLayout, ShaderStageFlags.VertexBit, 0, (uint)Unsafe.SizeOf<Matrix4x4>(), &projectionMatrix);
 
+        // Push vertices
         var vertexBuffers = new Buffer[] { vertexBuffer };
         var offsets = new ulong[] { 0 };
         fixed (ulong* offsetsPtr = offsets)
@@ -949,7 +764,7 @@ public unsafe partial class VulkanProvider
         }
 
         // Используем актуальное количество вершин
-        vk.CmdDraw(commandBuffer, 3, 1, 0, 0);
+        vk.CmdDraw(commandBuffer, vertsCount, 1, 0, 0);
 
         vk.CmdEndRenderPass(commandBuffer);
 
@@ -995,10 +810,7 @@ public unsafe partial class VulkanProvider
         vk!.ResetFences(device, 1, in inFlightFences[currentFrame]);
 
         Result submitResult = vk!.QueueSubmit(graphicsQueue, 1, in submitInfo, inFlightFences[currentFrame]);
-        if (submitResult != Result.Success)
-        {
-            throw new Exception("Failed to submit draw command buffer! Result: " + submitResult);
-        }
+        Assert.Success(submitResult, "Sumbit draw command buffer");
 
         var swapChains = stackalloc[] { swapChain };
         PresentInfoKHR presentInfo = new()
@@ -1100,6 +912,5 @@ public unsafe partial class VulkanProvider
         }
 
         return shaderModule;
-
     }
 }

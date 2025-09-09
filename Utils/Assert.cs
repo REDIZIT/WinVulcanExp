@@ -16,6 +16,7 @@ public static partial class Assert
 
 public static partial class Assert
 {
+    [StackTraceHidden]
     public static void Success(Result result, string operationName)
     {
         if (result != Result.Success)

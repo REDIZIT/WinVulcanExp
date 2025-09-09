@@ -8,6 +8,8 @@ public static class Engine
 
     private static VulkanProvider provider;
 
+    private static int currentAbsFrame;
+
     public static void AddTriangle(int x, int y, int width, int height)
     {
         int vertsIndex = verts.Count;
@@ -22,11 +24,11 @@ public static class Engine
 
     public static void Init()
     {
-        AddTriangle(100, 100, 100, 100);
-
         provider = new VulkanProvider();
         provider.Init();
 
+        AddTriangle(100, 100, 100, 100);
+        AddTriangle(300, 100, 100, 100);
         provider.UpdateVertexBuffer(verts);
 
         provider.Run();
@@ -34,6 +36,6 @@ public static class Engine
 
     public static void OnPreRender()
     {
-
+        currentAbsFrame++;
     }
 }
