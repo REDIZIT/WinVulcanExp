@@ -28,9 +28,12 @@ public static class Engine
         {
             vertices = new Vertex[]
             {
-                new(100, 100),
-                new(150, 200),
-                new(200, 50),
+                new(0, 0, 0, 1),
+                new(0, 400, 0, 0),
+                new(400, 400, 1, 0),
+                new(400, 400, 1, 0),
+                new(400, 0, 1, 1),
+                new(0, 0, 0, 1),
             }
         });
 

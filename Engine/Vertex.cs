@@ -7,20 +7,13 @@ public struct Vertex
 {
     public Vector2D<float> pos;
     public Vector3D<float> color;
+    public Vector2D<float> texCoord;
 
-    public Vertex(float x, float y)
+    public Vertex(float x, float y, float uvX, float uvY)
     {
         pos = new(x, y);
         color = new(1, 0, 0);
-    }
-
-    public static Vertex FromPos(float x, float y)
-    {
-        return new()
-        {
-            pos = new(x, y),
-            color = Vector3D<float>.One,
-        };
+        texCoord = new(uvX, uvY);
     }
 
     public static VertexInputBindingDescription GetBindingDescription()
@@ -52,6 +45,13 @@ public struct Vertex
                 Location = 1,
                 Format = Format.R32G32B32Sfloat,
                 Offset = (uint)Marshal.OffsetOf<Vertex>(nameof(color)),
+            },
+            new VertexInputAttributeDescription()
+            {
+                Binding = 0,
+                Location = 2,
+                Format = Format.R32G32Sfloat,
+                Offset = (uint)Marshal.OffsetOf<Vertex>(nameof(texCoord)),
             }
         };
 

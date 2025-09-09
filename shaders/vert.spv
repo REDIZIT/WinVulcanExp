@@ -1,21 +1,18 @@
 #version 450
 
-// Входные данные вершины из буфера
 layout(location = 0) in vec2 inPosition;
 layout(location = 1) in vec3 inColor;
+layout(location = 2) in vec2 inTexCoord;
 
-// Выходные данные для фрагментного шейдера
 layout(location = 0) out vec3 fragColor;
+layout(location = 1) out vec2 fragTexCoord;
 
-// Определение блока push-констант
-// Он будет содержать нашу матрицу проекции
 layout(push_constant) uniform PushConstants {
     mat4 projection;
-} pushConstants;
+} push_constants;
 
 void main() {
-    // Умножаем пиксельные координаты на матрицу проекции,
-    // чтобы получить итоговую позицию в clip space.
-    gl_Position = pushConstants.projection * vec4(inPosition, 0.0, 1.0);
+    gl_Position = push_constants.projection * vec4(inPosition, 0.0, 1.0);
     fragColor = inColor;
+    fragTexCoord = inTexCoord;
 }

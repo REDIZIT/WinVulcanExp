@@ -49,6 +49,15 @@ public unsafe partial class VulkanProvider
     private PipelineLayout pipelineLayout;
     private Pipeline graphicsPipeline;
 
+    private Image textureImage;
+    private DeviceMemory textureImageMemory;
+    private ImageView textureImageView;
+    private Sampler textureSampler;
+
+    private DescriptorSetLayout descriptorSetLayout;
+    private DescriptorPool descriptorPool;
+    private DescriptorSet[] descriptorSets;
+
     private CommandPool commandPool;
 
     private Buffer vertexBuffer;
@@ -104,10 +113,16 @@ public unsafe partial class VulkanProvider
         CreateSwapChain();
         CreateImageViews();
         CreateRenderPass();
+        CreateDescriptorSetLayout();
         CreateGraphicsPipeline();
         CreateFramebuffers();
         CreateCommandPool();
+        CreateTextureImage();
+        CreateTextureImageView();
+        CreateTextureSampler();
         CreateVertexBuffer();
+        CreateDescriptorPool();
+        CreateDescriptorSets();
         CreateCommandBuffers();
         CreateSyncObjects();
 
@@ -140,26 +155,25 @@ public unsafe partial class VulkanProvider
         foreach (Mesh mesh in meshes)
         {
             mesh.vertices.CopyTo(new Span<Vertex>(ptr, mesh.vertices.Length));
-            ptr += vertexSize * mesh.vertices.Length;
+            ptr += mesh.vertices.Length;
         }
 
         vk.UnmapMemory(device, vertexBufferMemory);
     }
-    // public void UpdateVertexBuffer(List<Vertex> newVertices)
-    // {
-    //     void* data;
-    //     vk.MapMemory(device, vertexBufferMemory, 0, (ulong)(Unsafe.SizeOf<Vertex>() * newVertices.Count), 0, &data);
-    //
-    //     newVertices.CopyTo(new Span<Vertex>(data, newVertices.Count));
-    //
-    //     vk.UnmapMemory(device, vertexBufferMemory);
-    //
-    //     vertsCount = (uint)newVertices.Count;
-    // }
 
     private void CleanUp()
     {
         CleanUpSwapChain();
+
+
+        vk!.DestroySampler(device, textureSampler, null);
+        vk!.DestroyImageView(device, textureImageView, null);
+        vk!.DestroyImage(device, textureImage, null);
+        vk!.FreeMemory(device, textureImageMemory, null);
+
+        vk!.DestroyDescriptorPool(device, descriptorPool, null);
+        vk!.DestroyDescriptorSetLayout(device, descriptorSetLayout, null);
+
 
         vk!.DestroyBuffer(device, vertexBuffer, null);
         vk!.FreeMemory(device, vertexBufferMemory, null);
@@ -186,6 +200,27 @@ public unsafe partial class VulkanProvider
     {
         vk = Vk.GetApi();
 
+
+#if DEBUG
+        string[] validationLayers = new[] { "VK_LAYER_KHRONOS_validation" };
+        // Проверка, что слои доступны. Необязательно, но полезно.
+        uint layerCount = 0;
+        vk.EnumerateInstanceLayerProperties(&layerCount, null);
+        var availableLayers = new LayerProperties[layerCount];
+        fixed (LayerProperties* availableLayersPtr = availableLayers)
+            vk.EnumerateInstanceLayerProperties(&layerCount, availableLayersPtr);
+
+        foreach (var layerName in validationLayers)
+        {
+            bool layerFound = availableLayers.Any(layer => Marshal.PtrToStringAnsi((IntPtr)layer.LayerName) == layerName);
+            if (!layerFound)
+            {
+                throw new Exception($"Validation layer not found: {layerName}");
+            }
+        }
+#endif
+
+
         ApplicationInfo appInfo = new()
         {
             SType = StructureType.ApplicationInfo,
@@ -206,13 +241,22 @@ public unsafe partial class VulkanProvider
         createInfo.EnabledExtensionCount = (uint)extensions.Length;
         createInfo.PpEnabledExtensionNames = (byte**)SilkMarshal.StringArrayToPtr(extensions);
 
-        createInfo.EnabledLayerCount = 0;
+#if DEBUG
+        createInfo.EnabledLayerCount = (uint)validationLayers.Length;
+        createInfo.PpEnabledLayerNames = (byte**)SilkMarshal.StringArrayToPtr(validationLayers);
+#else
+    createInfo.EnabledLayerCount = 0;
+#endif
         createInfo.PNext = null;
 
         if (vk.CreateInstance(in createInfo, null, out instance) != Result.Success)
         {
             throw new Exception("failed to create instance!");
         }
+
+#if DEBUG
+        SilkMarshal.Free((nint)createInfo.PpEnabledLayerNames);
+#endif
 
         Marshal.FreeHGlobal((IntPtr)appInfo.PApplicationName);
         Marshal.FreeHGlobal((IntPtr)appInfo.PEngineName);
@@ -564,13 +608,23 @@ public unsafe partial class VulkanProvider
                 Size = (uint)Unsafe.SizeOf<Matrix4x4>() // Размер нашей матрицы
             };
 
+            var setLayout = descriptorSetLayout; // Берем наш layout
             PipelineLayoutCreateInfo pipelineLayoutInfo = new()
             {
                 SType = StructureType.PipelineLayoutCreateInfo,
-                SetLayoutCount = 0,
+                SetLayoutCount = 1, // Указываем, что у нас один layout
+                PSetLayouts = &setLayout, // Передаем указатель на него
                 PushConstantRangeCount = 1,
                 PPushConstantRanges = &pushConstantRange
             };
+
+            // PipelineLayoutCreateInfo pipelineLayoutInfo = new()
+            // {
+            //     SType = StructureType.PipelineLayoutCreateInfo,
+            //     SetLayoutCount = 0,
+            //     PushConstantRangeCount = 1,
+            //     PPushConstantRanges = &pushConstantRange
+            // };
 
             if (vk!.CreatePipelineLayout(device, in pipelineLayoutInfo, null, out pipelineLayout) != Result.Success)
             {
@@ -771,6 +825,9 @@ public unsafe partial class VulkanProvider
 
         vk.CmdBeginRenderPass(commandBuffer, &renderPassInfo, SubpassContents.Inline);
         vk.CmdBindPipeline(commandBuffer, PipelineBindPoint.Graphics, graphicsPipeline);
+
+        var descriptorSet = descriptorSets[imageIndex];
+        vk.CmdBindDescriptorSets(commandBuffer, PipelineBindPoint.Graphics, pipelineLayout, 0, 1, &descriptorSet, 0, null);
 
         // Push constants
         var projectionMatrix = Matrix4x4.CreateOrthographicOffCenter(0, swapChainExtent.Width, swapChainExtent.Height, 0, -1.0f, 1.0f);
